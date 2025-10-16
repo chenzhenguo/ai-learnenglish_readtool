@@ -19,7 +19,6 @@
     lastDashed: false,
     lastSlash: false,
     lastCustomTextColor: null,
-    lastBoldColor: null,
     lastUnderlineColor: null,
     lastBorderColor: null,
     autoSync: true,
@@ -50,6 +49,14 @@
         autoApply: true,
         analyzeSelection: false
     },
+    gistConfig: {
+        token: '',
+        gistId: '',
+        filename: 'reading-annotator.json',
+        autoSync: false,
+        lastSyncAt: null,
+        status: 'idle'
+    },
     // 生词本
     vocabBook: [],
     reviewState: {
@@ -66,13 +73,78 @@
         pitch: 1.0,
         voice: null
     },
-    // 自定义类别配置
+    // 自定义类别配置（扩展支持默认样式）
     customCategories: [
-        { id: 'vocab', label: '生词', applyStyle: true },
-        { id: 'phrase', label: '词组', applyStyle: true },
-        { id: 'difficulty', label: '疑难', applyStyle: true },
-        { id: 'keypoint', label: '重点', applyStyle: true },
-        { id: 'translation', label: '翻译', applyStyle: true }
+        {
+            id: 'vocab',
+            label: '生词',
+            applyStyle: true,
+            defaultStyle: {
+                color: null,
+                textColor: null,
+                bold: true,
+                underline: false,
+                borderStyle: 'none',
+                borderColor: null,
+                underlineColor: null
+            }
+        },
+        {
+            id: 'phrase',
+            label: '词组',
+            applyStyle: true,
+            defaultStyle: {
+                color: null,
+                textColor: null,
+                bold: false,
+                underline: true,
+                borderStyle: 'none',
+                borderColor: null,
+                underlineColor: null
+            }
+        },
+        {
+            id: 'difficulty',
+            label: '疑难',
+            applyStyle: true,
+            defaultStyle: {
+                color: 'sunset',
+                textColor: null,
+                bold: false,
+                underline: false,
+                borderStyle: 'none',
+                borderColor: null,
+                underlineColor: null
+            }
+        },
+        {
+            id: 'keypoint',
+            label: '重点',
+            applyStyle: true,
+            defaultStyle: {
+                color: 'honey',
+                textColor: null,
+                bold: false,
+                underline: false,
+                borderStyle: 'none',
+                borderColor: null,
+                underlineColor: null
+            }
+        },
+        {
+            id: 'translation',
+            label: '翻译',
+            applyStyle: true,
+            defaultStyle: {
+                color: null,
+                textColor: null,
+                bold: false,
+                underline: false,
+                borderStyle: 'none',
+                borderColor: null,
+                underlineColor: null
+            }
+        }
     ]
 };
 
@@ -115,6 +187,11 @@ const MIN_READER_WIDTH = 35;
 const MAX_READER_WIDTH = 100;
 
 const HIGHLIGHT_COLORS = new Set(['honey', 'mint', 'sky', 'orchid', 'sunset']);
+let gistAutoSyncTimer = null;
+let gistAutoSyncSuspended = false;
+let gistSyncInFlight = false;
+const GIST_SYNC_DEBOUNCE_MS = 5000;
+
 
 document.addEventListener('DOMContentLoaded', () => {
     cacheDom();
@@ -184,6 +261,19 @@ function cacheDom() {
     dom.backupDataBtn = document.getElementById('backupDataBtn');
     dom.restoreDataBtn = document.getElementById('restoreDataBtn');
     dom.restoreDataInput = document.getElementById('restoreDataInput');
+    dom.syncGistBtn = document.getElementById('syncGistBtn');
+    dom.gistSettingsBtn = document.getElementById('gistSettingsBtn');
+    dom.gistSettingsModal = document.getElementById('gistSettingsModal');
+    dom.gistSettingsOverlay = dom.gistSettingsModal ? dom.gistSettingsModal.querySelector('.shortcuts-modal__overlay') : null;
+    dom.closeGistSettingsBtn = document.getElementById('closeGistSettingsBtn');
+    dom.saveGistSettingsBtn = document.getElementById('saveGistSettingsBtn');
+    dom.gistSyncFromModalBtn = document.getElementById('gistSyncFromModalBtn');
+    dom.gistTokenInput = document.getElementById('gistTokenInput');
+    dom.gistIdInput = document.getElementById('gistIdInput');
+    dom.gistFilenameInput = document.getElementById('gistFilenameInput');
+    dom.gistAutoSyncToggle = document.getElementById('gistAutoSyncToggle');
+    dom.gistStatusText = document.getElementById('gistStatusText');
+    dom.gistLastSyncValue = document.getElementById('gistLastSyncValue');
     dom.quickHighlightBtn = document.getElementById('quickHighlightBtn');
     dom.saveTemplateBtn = document.getElementById('saveTemplateBtn');
     dom.loadTemplateBtn = document.getElementById('loadTemplateBtn');
@@ -204,7 +294,6 @@ function cacheDom() {
     dom.formatDashedToggle = document.getElementById('formatDashedToggle');
     dom.formatSlashToggle = document.getElementById('formatSlashToggle');
     dom.textColorBtn = document.getElementById('textColorBtn');
-    dom.boldColorBtn = document.getElementById('boldColorBtn');
     dom.underlineColorBtn = document.getElementById('underlineColorBtn');
     dom.squareBorderColorBtn = document.getElementById('squareBorderColorBtn');
     dom.roundBorderColorBtn = document.getElementById('roundBorderColorBtn');
@@ -348,19 +437,6 @@ function bindEvents() {
     }
     if (dom.underlineToggle) {
         dom.underlineToggle.addEventListener('change', event => {
-            // 场景1：编辑模式 + 取消勾选下划线 = 删除标注
-            if (state.editingId && state.lastUnderline && !event.target.checked) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消下划线（selection-toolbar），删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换下划线状态
             state.lastUnderline = event.target.checked;
             updateLivePreview();
         });
@@ -368,19 +444,6 @@ function bindEvents() {
 
     if (dom.strikethroughToggle) {
         dom.strikethroughToggle.addEventListener('change', event => {
-            // 场景1：编辑模式 + 取消勾选删除线 = 删除标注
-            if (state.editingId && state.lastStrikethrough && !event.target.checked) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消删除线（selection-toolbar），删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换删除线状态
             state.lastStrikethrough = event.target.checked;
             updateLivePreview();
         });
@@ -403,6 +466,7 @@ function bindEvents() {
             btn.addEventListener('click', () => handleEmojiSelection(btn));
         });
     }
+    refreshGistSettingsUI();
 
     if (dom.customBgColor) {
         dom.customBgColor.addEventListener('input', event => {
@@ -501,6 +565,27 @@ function bindEvents() {
         dom.restoreDataBtn.addEventListener('click', () => dom.restoreDataInput.click());
         dom.restoreDataInput.addEventListener('change', handleDataRestore);
     }
+    if (dom.syncGistBtn) {
+        dom.syncGistBtn.addEventListener('click', () => syncDataToGist({ manual: true }));
+    }
+    if (dom.gistSettingsBtn) {
+        dom.gistSettingsBtn.addEventListener('click', openGistSettingsModal);
+    }
+    if (dom.closeGistSettingsBtn) {
+        dom.closeGistSettingsBtn.addEventListener('click', closeGistSettingsModal);
+    }
+    if (dom.gistSettingsOverlay) {
+        dom.gistSettingsOverlay.addEventListener('click', closeGistSettingsModal);
+    }
+    if (dom.saveGistSettingsBtn) {
+        dom.saveGistSettingsBtn.addEventListener('click', handleGistSettingsSave);
+    }
+    if (dom.gistSyncFromModalBtn) {
+        dom.gistSyncFromModalBtn.addEventListener('click', () => syncDataToGist({ manual: true }));
+    }
+    if (dom.gistAutoSyncToggle) {
+        dom.gistAutoSyncToggle.addEventListener('change', handleGistAutoSyncToggle);
+    }
     if (dom.quickHighlightBtn) {
         dom.quickHighlightBtn.addEventListener('click', handleQuickHighlight);
     }
@@ -539,53 +624,11 @@ function bindEvents() {
 
     if (dom.formatBoldToggle) {
         dom.formatBoldToggle.addEventListener('click', () => {
-            // 快速标注模式：toggle加粗并更新标注
-            if (quickAnnotationMode && state.editingId) {
-                console.log('[DEBUG] ⚡ 快速模式：toggle加粗');
-                setBoldState(!state.lastBold, { persist: true });
-                updateAnnotationStyle();
-                return;
-            }
-
-            // 场景1：普通编辑模式 + 当前是加粗状态 + 点击取消 = 删除标注
-            if (state.editingId && state.lastBold) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消加粗，删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换加粗状态
             setBoldState(!state.lastBold, { persist: true });
         });
     }
     if (dom.formatUnderlineToggle) {
         dom.formatUnderlineToggle.addEventListener('click', () => {
-            // 快速标注模式：toggle下划线并更新标注
-            if (quickAnnotationMode && state.editingId) {
-                console.log('[DEBUG] ⚡ 快速模式：toggle下划线');
-                setUnderlineState(!state.lastUnderline, { persist: true });
-                updateAnnotationStyle();
-                return;
-            }
-
-            // 场景1：普通编辑模式 + 当前是下划线状态 + 点击取消 = 删除标注
-            if (state.editingId && state.lastUnderline) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消下划线，删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换下划线状态
             setUnderlineState(!state.lastUnderline, { persist: true });
         });
     }
@@ -601,32 +644,6 @@ function bindEvents() {
     // formatting-toolbar 新样式按钮
     if (dom.formatStrikethroughToggle) {
         dom.formatStrikethroughToggle.addEventListener('click', () => {
-            // 快速标注模式：toggle删除线并更新标注
-            if (quickAnnotationMode && state.editingId) {
-                console.log('[DEBUG] ⚡ 快速模式：toggle删除线');
-                state.lastStrikethrough = !state.lastStrikethrough;
-                dom.formatStrikethroughToggle.classList.toggle('active', state.lastStrikethrough);
-                if (dom.strikethroughToggle) {
-                    dom.strikethroughToggle.checked = state.lastStrikethrough;
-                }
-                persistState();
-                updateAnnotationStyle();
-                return;
-            }
-
-            // 场景1：普通编辑模式 + 当前是删除线状态 + 点击取消 = 删除标注
-            if (state.editingId && state.lastStrikethrough) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消删除线，删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换删除线状态
             state.lastStrikethrough = !state.lastStrikethrough;
             dom.formatStrikethroughToggle.classList.toggle('active', state.lastStrikethrough);
             if (dom.strikethroughToggle) {
@@ -665,19 +682,6 @@ function bindEvents() {
 
     if (dom.boldToggle) {
         dom.boldToggle.addEventListener('change', event => {
-            // 场景1：编辑模式 + 取消勾选加粗 = 删除标注
-            if (state.editingId && state.lastBold && !event.target.checked) {
-                console.log('[DEBUG] 🗑️ 编辑模式下取消加粗（selection-toolbar），删除标注', { id: state.editingId });
-                deleteAnnotation(state.editingId);
-                hideToolbar();
-                // 清除选择
-                const selection = window.getSelection();
-                if (selection) {
-                    selection.removeAllRanges();
-                }
-                return;
-            }
-            // 场景2：普通模式 = 切换加粗状态
             setBoldState(event.target.checked);
         });
     }
@@ -692,111 +696,13 @@ function bindEvents() {
         });
     }
 
-    // 斜杠插入功能 - 点击工具栏按钮启用插入模式，然后在阅读区域点击位置插入斜杠
     if (dom.formatSlashToggle) {
         dom.formatSlashToggle.addEventListener('click', () => {
             state.lastSlash = !state.lastSlash;
             dom.formatSlashToggle.classList.toggle('active', state.lastSlash);
             dom.formatSlashToggle.setAttribute('aria-pressed', String(state.lastSlash));
-
-            if (state.lastSlash) {
-                // 根据是否在快速标注模式，显示不同的提示信息
-                if (quickAnnotationMode) {
-                    showToast('✓ 斜杠插入模式已启用（快速模式）\n• 点击位置插入 /\n• 再次点击已插入的 / 可删除\n• 支持连续插入', 'info');
-                } else {
-                    showToast('✓ 斜杠插入模式已启用\n• 点击位置插入 /\n• 再次点击已插入的 / 可删除', 'info');
-                }
-                // 改变光标样式提示用户
-                if (dom.readingArea) {
-                    dom.readingArea.style.cursor = 'crosshair';
-                }
-            } else {
-                if (dom.readingArea) {
-                    dom.readingArea.style.cursor = '';
-                }
-            }
             persistState();
         });
-    }
-
-    // 阅读区域点击事件 - 斜杠插入/删除模式
-    if (dom.readingArea) {
-        dom.readingArea.addEventListener('click', (event) => {
-            // 只有在斜杠插入模式启用时才处理
-            if (!state.lastSlash) return;
-
-            // 排除点击在已有标注上的情况
-            if (event.target.classList.contains('highlight')) return;
-
-            // 检查是否点击在已插入的斜杠上（删除功能）
-            const clickedNode = event.target.nodeType === Node.TEXT_NODE ? event.target : event.target.childNodes[0];
-            if (clickedNode && clickedNode.nodeType === Node.TEXT_NODE) {
-                const text = clickedNode.textContent;
-                const clickX = event.clientX;
-
-                // 计算点击位置在文本中的字符索引
-                const range = document.caretRangeFromPoint(clickX, event.clientY);
-                if (range && range.startContainer === clickedNode) {
-                    const offset = range.startOffset;
-
-                    // 检查点击位置前后是否有斜杠字符
-                    if (text[offset] === '/' || text[offset - 1] === '/') {
-                        const slashIndex = text[offset] === '/' ? offset : offset - 1;
-
-                        // 删除斜杠字符
-                        const newText = text.substring(0, slashIndex) + text.substring(slashIndex + 1);
-                        clickedNode.textContent = newText;
-
-                        console.log('[斜杠删除] 已删除位置', slashIndex, '的斜杠字符');
-                        showToast('✓ 已删除斜杠', 'success');
-
-                        // 在快速标注模式下，删除后保持插入模式开启
-                        // 在普通模式下，删除后关闭插入模式
-                        if (!quickAnnotationMode) {
-                            state.lastSlash = false;
-                            dom.formatSlashToggle.classList.remove('active');
-                            dom.formatSlashToggle.setAttribute('aria-pressed', 'false');
-                            dom.readingArea.style.cursor = '';
-                            persistState();
-                        }
-                        return;
-                    }
-                }
-            }
-
-            // 获取点击位置
-            const selection = window.getSelection();
-            const range = document.caretRangeFromPoint(event.clientX, event.clientY);
-
-            if (!range) return;
-
-            // 检查是否在阅读区域内
-            if (!dom.readingArea.contains(range.startContainer)) return;
-
-            // 插入斜杠字符
-            const textNode = document.createTextNode('/');
-            range.insertNode(textNode);
-
-            // 将光标移到斜杠后面
-            range.setStartAfter(textNode);
-            range.collapse(true);
-            selection.removeAllRanges();
-            selection.addRange(range);
-
-            console.log('[斜杠插入] 在位置插入斜杠字符');
-
-            // 在快速标注模式下，插入后保持插入模式开启（支持连续插入）
-            // 在普通模式下，插入后自动关闭插入模式
-            if (!quickAnnotationMode) {
-                state.lastSlash = false;
-                dom.formatSlashToggle.classList.remove('active');
-                dom.formatSlashToggle.setAttribute('aria-pressed', 'false');
-                dom.readingArea.style.cursor = '';
-            } else {
-                console.log('[斜杠插入] 快速标注模式：保持插入模式开启');
-            }
-            persistState();
-        }, true); // 使用捕获阶段，确保先于其他事件处理
     }
 
     // 边框按钮点击时设置边框状态并显示颜色选择按钮
@@ -1097,7 +1003,7 @@ function calculateAndDisplayStats() {
         .sort((a, b) => b[1] - a[1])
         .forEach(([cat, count]) => {
             const percentage = (count / maxCount * 100).toFixed(1);
-            const label = getCategoryLabel(cat);
+            const label = CATEGORY_LABELS[cat] || cat;
             const barHtml = `
                 <div class="chart-bar">
                     <div class="chart-bar-label">${label}</div>
@@ -1271,7 +1177,7 @@ function showContextMenu(x, y, highlightElement) {
     // 定位菜单在标注上方
     const menuRect = dom.highlightContextMenu.getBoundingClientRect();
     let left = x;
-    let top = y - menuRect.height - 25; // 在标注上方，留25px间距，避免挡住标注
+    let top = y - menuRect.height - 5; // 在标注上方，留5px间距
 
     // 防止菜单超出视口左侧
     if (left < 10) {
@@ -1805,19 +1711,6 @@ function setBoldState(enabled, options = {}) {
         dom.formatBoldToggle.classList.toggle('active', state.lastBold);
         dom.formatBoldToggle.setAttribute('aria-pressed', String(state.lastBold));
     }
-    // 显示/隐藏颜色选择按钮
-    if (dom.boldColorBtn) {
-        if (state.lastBold) {
-            dom.boldColorBtn.classList.remove('hidden');
-        } else {
-            dom.boldColorBtn.classList.add('hidden');
-            // 取消加粗时，清除加粗颜色设置
-            state.lastBoldColor = null;
-            if (dom.boldColorBtn.style) {
-                dom.boldColorBtn.style.background = '';
-            }
-        }
-    }
     if (persist) {
         persistState();
     }
@@ -1967,30 +1860,14 @@ function handleTextSelection() {
         return;
     }
 
-    // 检查是否选中了已有标注
-    const highlight = getHighlightAncestor(range.commonAncestorContainer);
-
-    // 如果是快速标注模式
+    // 如果是快速标注模式，直接应用样式
     if (quickAnnotationMode) {
-        if (highlight) {
-            // 选中了已有标注，加载其样式到工具栏（用于取消标注）
-            const selectedText = selection.toString().trim();
-            const highlightRange = document.createRange();
-            highlightRange.selectNodeContents(highlight);
-            const highlightFullText = highlightRange.toString().trim();
-
-            // 如果选中的是完整标注，加载其样式配置
-            if (selectedText === highlightFullText) {
-                console.log('[DEBUG] ⚡ 快速模式：选中已标注文字，加载样式配置');
-                loadAnnotationStyleToToolbar(highlight);
-                return;
-            }
-        }
-        // 否则直接应用新标注
         applyQuickAnnotationToSelection(range);
         return;
     }
 
+    // 检查是否选中了已有标注
+    const highlight = getHighlightAncestor(range.commonAncestorContainer);
     if (highlight) {
         // 获取选中的文本
         const selectedText = selection.toString().trim();
@@ -2122,7 +1999,6 @@ function prepareEditingExisting(highlight) {
 
     // 恢复自定义颜色
     state.lastCustomTextColor = record.customTextColor || null;
-    state.lastBoldColor = record.boldColor || null;
     state.lastUnderlineColor = record.underlineColor || null;
     state.lastBorderColor = record.borderColor || null;
 
@@ -2304,30 +2180,26 @@ function handleOutsideClick(event) {
 }
 
 function handleCategorySelection(button) {
-    console.log('[DEBUG] ?? ���ť���', { category: button.dataset.category });
+    console.log('[DEBUG] 📂 类别按钮点击', { category: button.dataset.category });
     const category = button.dataset.category;
     const isActive = button.classList.contains('active');
 
-    // ֧��ȡ��ѡ�������ѡ�У���ȡ��ѡ��
+    // 支持取消选择：如果已选中，则取消选中
     if (isActive) {
         button.classList.remove('active');
         state.lastCategory = null;
-        console.log('[DEBUG] ? ȡ�����ѡ��');
+        console.log('[DEBUG] ⭕ 取消类别选择');
         if (dom.customCategoryInput) {
             dom.customCategoryInput.classList.add('hidden');
         }
-
-        if (cancelEditingAnnotationFromToolbar()) {
-            return;
-        }
     } else {
-        // ȡ��������ť��ѡ��״̬
+        // 取消其他按钮的选中状态
         if (dom.categoryButtons) {
             dom.categoryButtons.forEach(btn => btn.classList.remove('active'));
         }
         button.classList.add('active');
         state.lastCategory = category;
-        console.log('[DEBUG] ? �����ѡ��', { category });
+        console.log('[DEBUG] ✅ 类别已选中', { category });
 
         if (category === 'custom') {
             if (dom.customCategoryInput) {
@@ -2342,68 +2214,7 @@ function handleCategorySelection(button) {
                 dom.customCategoryInput.classList.add('hidden');
             }
         }
-
-        const toolbarMode = dom.selectionToolbar?.dataset?.mode;
-        const requiresCustomInput = category === 'custom';
-        const canAutoSubmit =
-            !quickAnnotationMode &&
-            !requiresCustomInput &&
-            !state.editingId &&
-            !!state.activeRange &&
-            toolbarMode !== 'edit';
-
-        if (canAutoSubmit) {
-            const triggerAutoSubmit = () => autoSubmitAnnotationFromToolbar({ source: 'categoryClick' });
-            if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
-                window.requestAnimationFrame(triggerAutoSubmit);
-            } else {
-                setTimeout(triggerAutoSubmit, 0);
-            }
-        }
     }
-}
-
-function autoSubmitAnnotationFromToolbar(context = {}) {
-    if (!state.activeRange) {
-        return;
-    }
-
-    const fakeEvent = {
-        preventDefault() {}
-    };
-
-    const options = { autoTriggered: true, ...context };
-    handleAnnotationSubmit(fakeEvent, options);
-}
-
-
-function cancelEditingAnnotationFromToolbar() {
-    if (!state.editingId) {
-        return false;
-    }
-
-    const annotationId = state.editingId;
-    const recordIndex = state.annotations.findIndex(item => item.id === annotationId);
-    console.log('[DEBUG] ?? ͨ��������ťȡ����ע', { annotationId, recordFound: recordIndex !== -1 });
-
-    state.editingId = null;
-    state.activeRange = null;
-
-    if (recordIndex !== -1) {
-        deleteAnnotation(annotationId);
-    } else {
-        console.warn('[WARN] ? δ�ҵ���Ҫȡ����ע', { annotationId });
-    }
-
-    hideToolbar();
-    window.getSelection()?.removeAllRanges();
-    resetToolbarForm();
-
-    if (recordIndex !== -1) {
-        showToast('标注已取消', 'info');
-    }
-
-    return true;
 }
 
 function activateCategory(category, customLabel) {
@@ -2491,10 +2302,6 @@ function updateLivePreview() {
             mark.style.color = state.lastCustomTextColor;
             console.log('[DEBUG] 🎨 预览自定义文字颜色', { color: state.lastCustomTextColor });
         }
-        if (state.lastBoldColor && state.lastBold) {
-            mark.style.color = state.lastBoldColor;
-            console.log('[DEBUG] 🔤 预览加粗颜色', { color: state.lastBoldColor });
-        }
         if (state.lastUnderlineColor && state.lastUnderline) {
             mark.style.textDecorationColor = state.lastUnderlineColor;
             console.log('[DEBUG] 📏 预览下划线颜色', { color: state.lastUnderlineColor });
@@ -2519,34 +2326,10 @@ function updateLivePreview() {
 function handleColorSelection(button, options = {}) {
     if (!button || !button.dataset.color) return;
     const clickedColor = button.dataset.color;
-    console.log('[DEBUG] 🎨 颜色按钮点击', { clickedColor, currentColor: state.lastColor, editingId: state.editingId });
+    console.log('[DEBUG] 🎨 颜色按钮点击', { clickedColor, currentColor: state.lastColor });
 
-    // 如果点击的是已选中的颜色
+    // 如果点击的是已选中的颜色，取消选择
     if (state.lastColor === clickedColor) {
-        // 快速标注模式：移除颜色并更新标注
-        if (quickAnnotationMode && state.editingId) {
-            console.log('[DEBUG] ⚡ 快速模式：移除颜色样式');
-            state.lastColor = null;
-            updateActiveColorButtons(dom.colorButtons, null);
-            updateActiveColorButtons(dom.formatColorButtons, null);
-            updateAnnotationStyle();
-            return;
-        }
-
-        // 场景1：普通编辑模式 + 点击相同颜色 = 删除标注
-        if (state.editingId) {
-            console.log('[DEBUG] 🗑️ 编辑模式下取消颜色，删除标注', { id: state.editingId });
-            deleteAnnotation(state.editingId);
-            hideToolbar();
-            // 清除选择
-            const selection = window.getSelection();
-            if (selection) {
-                selection.removeAllRanges();
-            }
-            return;
-        }
-
-        // 场景2：普通模式 + 点击相同颜色 = 取消选择
         state.lastColor = null;
         console.log('[DEBUG] ⭕ 取消颜色选择');
         updateActiveColorButtons(dom.colorButtons, null);
@@ -2558,13 +2341,6 @@ function handleColorSelection(button, options = {}) {
         // 选中新颜色
         console.log('[DEBUG] ✅ 颜色已选中', { color: clickedColor });
         setHighlightColor(clickedColor, options);
-
-        // 快速标注模式：选中新颜色后立即更新
-        if (quickAnnotationMode && state.editingId) {
-            console.log('[DEBUG] ⚡ 快速模式：更新颜色');
-            updateAnnotationStyle();
-            return;
-        }
     }
     updateLivePreview();
 }
@@ -2580,30 +2356,6 @@ function handleBorderStyleSelection(button) {
 
     // 支持取消选择：如果已选中，则取消选中
     if (isActive) {
-        // 快速标注模式：移除边框并更新标注
-        if (quickAnnotationMode && state.editingId) {
-            console.log('[DEBUG] ⚡ 快速模式：移除边框样式');
-            button.classList.remove('active');
-            state.lastBorderStyle = 'none';
-            persistState();
-            updateAnnotationStyle();
-            return;
-        }
-
-        // 场景1：普通编辑模式 + 点击active边框 = 删除标注
-        if (state.editingId) {
-            console.log('[DEBUG] 🗑️ 编辑模式下取消边框，删除标注', { id: state.editingId });
-            deleteAnnotation(state.editingId);
-            hideToolbar();
-            // 清除选择
-            const selection = window.getSelection();
-            if (selection) {
-                selection.removeAllRanges();
-            }
-            return;
-        }
-
-        // 场景2：普通模式 + 点击active边框 = 取消选择
         button.classList.remove('active');
         state.lastBorderStyle = 'none';
         // 取消边框时，清除边框颜色设置
@@ -2624,13 +2376,6 @@ function handleBorderStyleSelection(button) {
         }
         button.classList.add('active');
         state.lastBorderStyle = borderStyle;
-
-        // 快速标注模式：选中新边框后立即更新
-        if (quickAnnotationMode && state.editingId) {
-            console.log('[DEBUG] ⚡ 快速模式：更新边框');
-            updateAnnotationStyle();
-            return;
-        }
     }
     updateLivePreview();
     persistState();
@@ -2643,20 +2388,6 @@ function handleEmojiSelection(button) {
 
     // 支持取消选择：如果已选中，则取消选中
     if (isActive) {
-        // 场景1：编辑模式 + 点击active emoji = 删除标注
-        if (state.editingId) {
-            console.log('[DEBUG] 🗑️ 编辑模式下取消emoji，删除标注', { id: state.editingId });
-            deleteAnnotation(state.editingId);
-            hideToolbar();
-            // 清除选择
-            const selection = window.getSelection();
-            if (selection) {
-                selection.removeAllRanges();
-            }
-            return;
-        }
-
-        // 场景2：普通模式 + 点击active emoji = 取消选择
         button.classList.remove('active');
         state.lastEmoji = '';
     } else {
@@ -2780,10 +2511,8 @@ function resetToolbarForm() {
     }
 }
 
-function handleAnnotationSubmit(event, options = {}) {
-    if (event && typeof event.preventDefault === 'function') {
-        event.preventDefault();
-    }
+function handleAnnotationSubmit(event) {
+    event.preventDefault();
     const range = state.activeRange;
 
     // 编辑模式：从已有记录获取文本；创建模式：从range获取文本
@@ -2874,7 +2603,7 @@ function handleAnnotationSubmit(event, options = {}) {
 }
 
 
-function createNewAnnotation({ text, category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, range, dashed, slash, customTextColor, boldColor, underlineColor, borderColor }) {
+function createNewAnnotation({ text, category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, range, dashed, slash, customTextColor, underlineColor, borderColor }) {
     const activeDocument = getActiveDocument();
     if (!activeDocument) {
         showToast('请先创建或选择一篇短文', 'warning');
@@ -2914,7 +2643,6 @@ function createNewAnnotation({ text, category, customCategory, color, underline,
                 dashed: dashed || false,
                 slash: slash || false,
                 customTextColor: customTextColor,
-                boldColor: boldColor,
                 underlineColor: underlineColor,
                 borderColor: borderColor,
                 note,
@@ -2947,9 +2675,6 @@ function createNewAnnotation({ text, category, customCategory, color, underline,
             }
             renderDocumentList();
             persistState();
-
-            // 调整重叠标注的下划线高度
-            adjustOverlappingUnderlines();
             return;
         }
     }
@@ -2976,7 +2701,6 @@ function createNewAnnotation({ text, category, customCategory, color, underline,
         dashed: dashed || false,
         slash: slash || false,
         customTextColor: customTextColor,
-        boldColor: boldColor,
         underlineColor: underlineColor,
         borderColor: borderColor,
         note,
@@ -3004,18 +2728,11 @@ function createNewAnnotation({ text, category, customCategory, color, underline,
     renderDocumentList();
     persistState();
 
-    // 调整重叠标注的下划线高度
-    adjustOverlappingUnderlines();
-
     // 创建标注后，清除临时颜色设置，避免下次标注自动应用
     // 注意：不清除 customTextColor，因为那是全局文字颜色设置
-    state.lastBoldColor = null;
     state.lastUnderlineColor = null;
     state.lastBorderColor = null;
     // 同时清除按钮的视觉状态
-    if (dom.boldColorBtn?.style) {
-        dom.boldColorBtn.style.background = '';
-    }
     if (dom.underlineColorBtn?.style) {
         dom.underlineColorBtn.style.background = '';
     }
@@ -3027,7 +2744,7 @@ function createNewAnnotation({ text, category, customCategory, color, underline,
     }
 }
 
-function updateExistingAnnotation({ id, text, category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, dashed, slash, customTextColor, boldColor, underlineColor, borderColor }) {
+function updateExistingAnnotation({ id, text, category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, dashed, slash, customTextColor, underlineColor, borderColor }) {
     const record = state.annotations.find(item => item.id === id);
     if (!record) return;
 
@@ -3054,7 +2771,6 @@ function updateExistingAnnotation({ id, text, category, customCategory, color, u
     record.dashed = Boolean(dashed);
     record.slash = Boolean(slash);
     record.customTextColor = customTextColor;
-    record.boldColor = boldColor;
     record.underlineColor = underlineColor;
     record.borderColor = borderColor;
     record.updatedAt = new Date().toISOString();
@@ -3149,9 +2865,6 @@ function updateExistingAnnotation({ id, text, category, customCategory, color, u
         } else {
             highlight.style.color = '';
         }
-        if (record.boldColor && record.bold) {
-            highlight.style.color = record.boldColor;
-        }
         if (record.underlineColor && record.underline) {
             highlight.style.textDecorationColor = record.underlineColor;
         } else {
@@ -3189,9 +2902,6 @@ function updateExistingAnnotation({ id, text, category, customCategory, color, u
     saveHistory('update', { oldValue, newValue });
 
     persistState();
-
-    // 调整重叠标注的下划线高度
-    adjustOverlappingUnderlines();
 }
 
 /**
@@ -3206,8 +2916,13 @@ function createHighlightElement(record, nestLevel) {
     highlight.dataset.id = record.id;
     highlight.dataset.category = record.category;
 
-    // 只在有颜色时才设置data-color属性
-    if (record.color) {
+    // 背景颜色优先级：customBgColor > color
+    // 确保两者互斥，避免CSS冲突
+    if (record.customBgColor) {
+        // 使用自定义背景色时，不设置data-color属性
+        highlight.style.backgroundColor = record.customBgColor;
+    } else if (record.color) {
+        // 使用预设颜色时，设置data-color属性（由CSS控制背景）
         highlight.dataset.color = record.color;
     }
 
@@ -3257,9 +2972,7 @@ function createHighlightElement(record, nestLevel) {
     if (record.emoji) {
         highlight.dataset.emoji = record.emoji;
     }
-    if (record.customBgColor) {
-        highlight.style.backgroundColor = record.customBgColor;
-    }
+    // customBgColor 已在前面处理，此处无需重复设置
     if (record.fontFamily) {
         highlight.style.fontFamily = record.fontFamily;
     }
@@ -3275,9 +2988,6 @@ function createHighlightElement(record, nestLevel) {
     }
     if (record.customTextColor) {
         highlight.style.color = record.customTextColor;
-    }
-    if (record.boldColor && record.bold) {
-        highlight.style.color = record.boldColor;
     }
     if (record.underlineColor && record.underline) {
         highlight.style.textDecorationColor = record.underlineColor;
@@ -3554,7 +3264,8 @@ function applyHighlight(range, record) {
 
             const noteBelow = document.createElement('span');
             noteBelow.className = 'highlight-note-below';
-            noteBelow.textContent = record.note;
+            // 支持换行：将 \n 转换为 <br> 标签
+            noteBelow.innerHTML = escapeHtml(record.note).replace(/\n/g, '<br>');
             wrapper.appendChild(noteBelow);
 
             range.insertNode(wrapper);
@@ -3806,55 +3517,12 @@ function copyAnnotationsToClipboard() {
         showToast('筛选条件下暂无标注可复制', 'info');
         return;
     }
-
-    // 按类别分组
-    const grouped = {};
-    filtered.forEach(item => {
-        const categoryKey = item.category === 'custom' ? item.customCategory : item.category;
-        if (!grouped[categoryKey]) {
-            grouped[categoryKey] = [];
-        }
-        grouped[categoryKey].push(item);
-    });
-
-    // 按类别顺序生成文本
-    const categoryOrder = ['vocab', 'phrase', 'difficulty', 'keypoint', 'translation'];
-    const textParts = [];
-
-    // 先输出预设类别
-    categoryOrder.forEach(categoryKey => {
-        if (grouped[categoryKey]) {
-            const label = getCategoryLabel(categoryKey);
-            textParts.push(`【${label}】(${grouped[categoryKey].length})`);
-            grouped[categoryKey].forEach((item, index) => {
-                const tagText = item.tags.length ? ` #${item.tags.join(' #')}` : '';
-                let itemText = `${index + 1}. ${item.text}${tagText}`;
-                if (item.note) {
-                    itemText += `\n   释义：${item.note}`;
-                }
-                textParts.push(itemText);
-            });
-            textParts.push(''); // 空行分隔
-            delete grouped[categoryKey];
-        }
-    });
-
-    // 输出自定义类别
-    Object.keys(grouped).forEach(categoryKey => {
-        const label = getCategoryLabel(categoryKey);
-        textParts.push(`【${label}】(${grouped[categoryKey].length})`);
-        grouped[categoryKey].forEach((item, index) => {
-            const tagText = item.tags.length ? ` #${item.tags.join(' #')}` : '';
-            let itemText = `${index + 1}. ${item.text}${tagText}`;
-            if (item.note) {
-                itemText += `\n   释义：${item.note}`;
-            }
-            textParts.push(itemText);
-        });
-        textParts.push(''); // 空行分隔
-    });
-
-    const text = textParts.join('\n').trim();
+    const text = filtered.map(item => {
+        const label = item.category === 'custom' ? item.customCategory : CATEGORY_LABELS[item.category] || item.category;
+        const tagText = item.tags.length ? ` #${item.tags.join(' #')}` : '';
+        const note = item.note ? `\n释义：${item.note}` : '';
+        return `[${label}] ${item.text}${tagText}${note}`;
+    }).join('\n\n');
 
     navigator.clipboard.writeText(text).then(() => {
         showToast('标注内容已复制到剪贴板', 'success');
@@ -3925,7 +3593,7 @@ function exportAnnotationsAsMarkdown() {
     markdown += `**总计**: ${filtered.length} 条标注\n\n`;
 
     Object.entries(grouped).forEach(([cat, items]) => {
-        const label = getCategoryLabel(cat);
+        const label = CATEGORY_LABELS[cat] || cat;
         markdown += `### ${label} (${items.length})\n\n`;
 
         items.forEach((item, index) => {
@@ -3945,7 +3613,7 @@ function exportAnnotationsAsMarkdown() {
 
     markdown += `---\n\n`;
     markdown += `📊 **统计**: `;
-    const categoryNames = Object.keys(grouped).map(cat => getCategoryLabel(cat));
+    const categoryNames = Object.keys(grouped).map(cat => CATEGORY_LABELS[cat] || cat);
     markdown += categoryNames.join(' | ');
     markdown += `\n\n`;
     markdown += `*由英语短文阅读标注工具生成*\n`;
@@ -4237,20 +3905,40 @@ function applyImportedAnnotations(records) {
     return stats;
 }
 
-function findRangeForText(text) {
+function findRangeForText(text, usedRanges = []) {
     if (!dom.readingArea) return null;
     const walker = document.createTreeWalker(dom.readingArea, NodeFilter.SHOW_TEXT);
+
     while (walker.nextNode()) {
         const node = walker.currentNode;
         if (!node || !node.nodeValue) continue;
-        const index = node.nodeValue.indexOf(text);
-        if (index === -1) continue;
 
-        const range = document.createRange();
-        range.setStart(node, index);
-        range.setEnd(node, index + text.length);
-        return range;
+        // 在当前节点中查找所有匹配位置
+        let searchIndex = 0;
+        while (searchIndex < node.nodeValue.length) {
+            const index = node.nodeValue.indexOf(text, searchIndex);
+            if (index === -1) break;
+
+            // 检查这个位置是否已被使用
+            const isUsed = usedRanges.some(used =>
+                used.node === node &&
+                used.startOffset === index &&
+                used.endOffset === index + text.length
+            );
+
+            if (!isUsed) {
+                // 找到未使用的位置
+                const range = document.createRange();
+                range.setStart(node, index);
+                range.setEnd(node, index + text.length);
+                return range;
+            }
+
+            // 继续查找下一个匹配
+            searchIndex = index + 1;
+        }
     }
+
     return null;
 }
 
@@ -4446,42 +4134,6 @@ function renderAnnotationList() {
         return;
     }
 
-    // 获取每个标注在文本中的位置
-    const readingText = dom.readingArea ? dom.readingArea.textContent : '';
-    annotations.forEach(record => {
-        const firstHighlight = dom.readingArea.querySelector(`.highlight[data-id="${record.id}"]`);
-        if (firstHighlight) {
-            // 使用DOM元素的位置
-            const walker = document.createTreeWalker(
-                dom.readingArea,
-                NodeFilter.SHOW_TEXT,
-                null
-            );
-            let charCount = 0;
-            let node;
-            let found = false;
-            while (node = walker.nextNode()) {
-                if (firstHighlight.contains(node)) {
-                    record._position = charCount;
-                    found = true;
-                    break;
-                }
-                charCount += node.textContent.length;
-            }
-            if (!found) {
-                record._position = readingText.indexOf(record.text);
-            }
-        } else {
-            record._position = readingText.indexOf(record.text);
-        }
-        if (record._position === -1) {
-            record._position = Infinity; // 未找到的放在最后
-        }
-    });
-
-    // 按位置排序
-    annotations.sort((a, b) => a._position - b._position);
-
     // 按类别分组
     const groupedByCategory = {};
     annotations.forEach(record => {
@@ -4548,7 +4200,7 @@ function createCategoryGroup(categoryKey, records) {
                 ${escapeHtml(record.text)}
                 ${countBadge}
             </div>
-            ${record.note ? `<div class="annotation-note">${escapeHtml(record.note)}</div>` : ''}
+            ${record.note ? `<div class="annotation-note">${escapeHtml(record.note).replace(/\n/g, '<br>')}</div>` : ''}
             ${record.tags.length ? `<div class="annotation-tags">${record.tags.map(tag => `<span class="tag-pill">${escapeHtml(tag)}</span>`).join(' ')}</div>` : ''}
         `;
 
@@ -4726,7 +4378,9 @@ function getCategoryDistribution() {
         const isCustom = record.category === 'custom';
         const key = isCustom ? (record.customCategory || 'custom') : record.category;
         const datasetCategory = isCustom ? 'custom' : record.category;
-        const label = getCategoryLabel(key);
+        const label = isCustom
+            ? (record.customCategory || '自定义')
+            : (CATEGORY_LABELS[record.category] || record.category);
 
         if (!distribution.has(key)) {
             distribution.set(key, { key, label, count: 0, datasetCategory, isCustom });
@@ -4812,6 +4466,7 @@ function initializeAppState() {
             defaultEmojiBtn.classList.add('active');
         }
     }
+    refreshGistSettingsUI();
 }
 
 function restoreStateFromStorage() {
@@ -4844,7 +4499,6 @@ function sanitizePersistedData(raw) {
             lastDashed: state.lastDashed,
             lastSlash: state.lastSlash,
             lastCustomTextColor: state.lastCustomTextColor,
-            lastBoldColor: state.lastBoldColor,
             lastUnderlineColor: state.lastUnderlineColor,
             lastBorderColor: state.lastBorderColor,
             lastCustomCategory: state.lastCustomCategory,
@@ -4858,6 +4512,7 @@ function sanitizePersistedData(raw) {
             aiConfig: state.aiConfig,
             vocabBook: [],
             activeDocumentId: null,
+            gistConfig: sanitizeGistConfig(null),
             documents: []
         };
     }
@@ -4879,7 +4534,6 @@ function sanitizePersistedData(raw) {
         lastDashed: raw.lastDashed !== undefined ? Boolean(raw.lastDashed) : state.lastDashed,
         lastSlash: raw.lastSlash !== undefined ? Boolean(raw.lastSlash) : state.lastSlash,
         lastCustomTextColor: raw.lastCustomTextColor || state.lastCustomTextColor,
-        lastBoldColor: raw.lastBoldColor || state.lastBoldColor,
         lastUnderlineColor: raw.lastUnderlineColor || state.lastUnderlineColor,
         lastBorderColor: raw.lastBorderColor || state.lastBorderColor,
         lastCustomCategory: typeof raw.lastCustomCategory === 'string' ? raw.lastCustomCategory : state.lastCustomCategory,
@@ -4900,7 +4554,34 @@ function sanitizePersistedData(raw) {
         } : state.aiConfig,
         vocabBook: Array.isArray(raw.vocabBook) ? raw.vocabBook : [],
         activeDocumentId: typeof raw.activeDocumentId === 'string' ? raw.activeDocumentId : null,
+        gistConfig: sanitizeGistConfig(raw.gistConfig),
         documents
+    };
+}
+
+function sanitizeGistConfig(raw) {
+    if (!raw || typeof raw !== 'object') {
+        return {
+            token: '',
+            gistId: '',
+            filename: 'reading-annotator.json',
+            autoSync: false,
+            lastSyncAt: null,
+            status: 'idle'
+        };
+    }
+
+    const filename = typeof raw.filename === 'string' && raw.filename.trim()
+        ? raw.filename.trim()
+        : 'reading-annotator.json';
+
+    return {
+        token: typeof raw.token === 'string' ? raw.token.trim() : '',
+        gistId: typeof raw.gistId === 'string' ? raw.gistId.trim() : '',
+        filename,
+        autoSync: Boolean(raw.autoSync),
+        lastSyncAt: typeof raw.lastSyncAt === 'string' ? raw.lastSyncAt : null,
+        status: typeof raw.status === 'string' ? raw.status : 'idle'
     };
 }
 
@@ -4951,7 +4632,6 @@ function sanitizeAnnotationRecord(raw) {
         dashed: Boolean(raw.dashed),
         slash: Boolean(raw.slash),
         customTextColor: raw.customTextColor || null,
-        boldColor: raw.boldColor || null,
         underlineColor: raw.underlineColor || null,
         borderColor: raw.borderColor || null,
         note: typeof raw.note === 'string' ? raw.note : '',
@@ -4988,7 +4668,6 @@ function buildPersistedPayload() {
         lastDashed: state.lastDashed,
         lastSlash: state.lastSlash,
         lastCustomTextColor: state.lastCustomTextColor,
-        lastBoldColor: state.lastBoldColor,
         lastUnderlineColor: state.lastUnderlineColor,
         lastBorderColor: state.lastBorderColor,
         lastCustomCategory: state.lastCustomCategory,
@@ -5002,6 +4681,7 @@ function buildPersistedPayload() {
         aiConfig: state.aiConfig,
         vocabBook: state.vocabBook,
         activeDocumentId: state.activeDocumentId,
+        gistConfig: sanitizeGistConfig(state.gistConfig),
         documents: state.documents.map(doc => ({
             id: doc.id,
             title: doc.title,
@@ -5028,7 +4708,6 @@ function buildPersistedPayload() {
                 dashed: record.dashed,
                 slash: record.slash,
                 customTextColor: record.customTextColor,
-                boldColor: record.boldColor,
                 underlineColor: record.underlineColor,
                 borderColor: record.borderColor,
                 note: record.note,
@@ -5049,6 +4728,7 @@ function persistState() {
     try {
         const payload = buildPersistedPayload();
         window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        maybeQueueGistAutoSync();
     } catch (error) {
         console.warn('无法写入本地缓存：', error);
     }
@@ -5611,118 +5291,6 @@ function renderAllHighlights() {
 
     // 清理空的 highlight 元素
     cleanEmptyHighlights();
-
-    // 调整重叠标注的下划线高度
-    adjustOverlappingUnderlines();
-}
-
-/**
- * 调整重叠标注的下划线高度，避免重叠
- * 文本短的标注下划线在上，文本长的标注下划线在下
- */
-function adjustOverlappingUnderlines() {
-    console.log('[下划线调整] 开始调整重叠标注的下划线高度');
-
-    // 只处理有下划线或虚线样式的标注
-    const allHighlights = Array.from(dom.readingArea.querySelectorAll('.highlight'));
-    const underlinedHighlights = allHighlights.filter(hl => {
-        const hasUnderline = hl.dataset.underline === 'true';
-        const hasDashed = hl.dataset.dashed === 'true';
-        return hasUnderline || hasDashed;
-    });
-
-    console.log(`[下划线调整] 找到 ${underlinedHighlights.length} 个有下划线/虚线的标注`);
-
-    if (underlinedHighlights.length === 0) return;
-
-    // 先重置所有下划线标注的nest-level为0
-    underlinedHighlights.forEach(hl => {
-        hl.dataset.nestLevel = '0';
-    });
-
-    // 为每个标注创建一个位置信息对象
-    const highlightInfos = underlinedHighlights.map(hl => {
-        const rect = hl.getBoundingClientRect();
-        const info = {
-            element: hl,
-            id: hl.dataset.id,
-            text: hl.textContent,
-            textLength: hl.textContent.length,
-            left: rect.left,
-            right: rect.right,
-            top: rect.top,
-            bottom: rect.bottom,
-            isUnderline: hl.dataset.underline === 'true',
-            isDashed: hl.dataset.dashed === 'true'
-        };
-        console.log(`[下划线调整] 标注信息: "${info.text.substring(0, 15)}" | 长度:${info.textLength} | 实线:${info.isUnderline} | 虚线:${info.isDashed} | 位置:${Math.round(info.left)}-${Math.round(info.right)} | top:${Math.round(info.top)}`);
-        return info;
-    });
-
-    // 对每个标注，找出所有与它重叠的标注（包括自己）
-    const overlappingMap = new Map();
-
-    highlightInfos.forEach((info, i) => {
-        const overlapping = [info];
-
-        for (let j = 0; j < highlightInfos.length; j++) {
-            if (i === j) continue;
-            const other = highlightInfos[j];
-
-            // 检查是否在同一行（垂直位置接近）
-            const onSameLine = Math.abs(info.top - other.top) < 10;
-            if (!onSameLine) continue;
-
-            // 检查水平方向是否有重叠或包含关系
-            const horizontalOverlap = !(info.right < other.left || other.right < info.left);
-
-            // 检查是否有包含关系（一个标注包含另一个）
-            const infoContainsOther = info.left <= other.left && info.right >= other.right;
-            const otherContainsInfo = other.left <= info.left && other.right >= info.right;
-
-            if (horizontalOverlap || infoContainsOther || otherContainsInfo) {
-                overlapping.push(other);
-            }
-        }
-
-        overlappingMap.set(info.id, overlapping);
-    });
-
-    // 对每个标注，根据它与其他重叠标注的关系确定nest-level
-    highlightInfos.forEach(info => {
-        const overlapping = overlappingMap.get(info.id);
-
-        if (overlapping.length <= 1) {
-            // 没有重叠，保持level 0
-            info.element.dataset.nestLevel = '0';
-            console.log(`[下划线调整] ✓ "${info.text.substring(0, 15)}" 无重叠，level=0`);
-            return;
-        }
-
-        // 按文本长度升序排序（短的在前，长的在后）
-        overlapping.sort((a, b) => {
-            if (a.textLength !== b.textLength) {
-                return a.textLength - b.textLength;
-            }
-            // 如果长度相同，按左边位置排序
-            return a.left - b.left;
-        });
-
-        // 找到当前标注在排序后的位置，这就是它的nest-level
-        const level = overlapping.findIndex(item => item.id === info.id);
-        info.element.dataset.nestLevel = String(level);
-
-        // 详细日志
-        const overlappingTexts = overlapping.map(o => `"${o.text.substring(0, 10)}"(长${o.textLength})`).join(', ');
-        console.log(`[下划线调整] ✓ "${info.text.substring(0, 15)}" | 实线:${info.isUnderline} 虚线:${info.isDashed} | level=${level} | 与${overlapping.length-1}个重叠: [${overlappingTexts}]`);
-
-        // 验证CSS属性是否生效
-        const computedStyle = window.getComputedStyle(info.element);
-        const actualOffset = computedStyle.textUnderlineOffset;
-        console.log(`[下划线调整]   → 实际CSS offset: ${actualOffset} | data-nest-level="${info.element.dataset.nestLevel}" | data-underline="${info.element.dataset.underline}" | data-dashed="${info.element.dataset.dashed}"`);
-    });
-
-    console.log('[下划线调整] 调整完成');
 }
 
 function restoreAnnotation(record) {
@@ -6070,10 +5638,26 @@ function renderActiveDocument(doc, options = {}) {
 
 function hydrateActiveAnnotations(doc) {
     if (!dom.readingArea || !Array.isArray(doc.annotations)) return;
+
+    // 跟踪已使用的文本位置，避免重复标注同一位置
+    const usedRanges = [];
+
     doc.annotations.forEach(record => {
-        const range = findRangeForText(record.text);
+        const range = findRangeForText(record.text, usedRanges);
         if (range) {
             applyHighlight(range, record);
+            // 记录已使用的range，避免重复
+            usedRanges.push({
+                node: range.startContainer,
+                startOffset: range.startOffset,
+                endOffset: range.endOffset
+            });
+        } else {
+            console.warn('[DEBUG] ⚠️ 无法恢复标注:', {
+                text: record.text.substring(0, 50) + (record.text.length > 50 ? '...' : ''),
+                id: record.id,
+                category: record.category
+            });
         }
     });
 }
@@ -6206,7 +5790,6 @@ function loadDataFromPayload(payload, options = {}) {
     state.lastDashed = data.lastDashed ?? false;
     state.lastSlash = data.lastSlash ?? false;
     state.lastCustomTextColor = data.lastCustomTextColor ?? null;
-    state.lastBoldColor = data.lastBoldColor ?? null;
     state.lastUnderlineColor = data.lastUnderlineColor ?? null;
     state.lastBorderColor = data.lastBorderColor ?? null;
     state.lastCustomCategory = data.lastCustomCategory ?? '';
@@ -6218,6 +5801,7 @@ function loadDataFromPayload(payload, options = {}) {
     state.theme = data.theme ?? 'light';
     state.annotationTemplates = data.annotationTemplates ?? [];
     state.aiConfig = data.aiConfig ?? state.aiConfig;
+    state.gistConfig = sanitizeGistConfig(data.gistConfig);
     state.vocabBook = data.vocabBook ?? [];
     state.activeDocumentId = data.activeDocumentId;
     state.documents = data.documents;
@@ -6261,8 +5845,239 @@ function loadDataFromPayload(payload, options = {}) {
         }
     }
 
+    refreshGistSettingsUI();
+    maybeQueueGistAutoSync();
+
     if (!options.skipPersist) {
         persistState();
+    }
+}
+
+function openGistSettingsModal() {
+    if (!dom.gistSettingsModal) return;
+    refreshGistSettingsUI();
+    dom.gistSettingsModal.classList.remove('hidden');
+    if (dom.gistTokenInput) {
+        setTimeout(() => dom.gistTokenInput.focus(), 50);
+    }
+}
+
+function closeGistSettingsModal() {
+    if (!dom.gistSettingsModal) return;
+    dom.gistSettingsModal.classList.add('hidden');
+}
+
+function handleGistSettingsSave() {
+    const token = dom.gistTokenInput ? dom.gistTokenInput.value.trim() : '';
+    const gistId = dom.gistIdInput ? dom.gistIdInput.value.trim() : '';
+    const filenameInput = dom.gistFilenameInput ? dom.gistFilenameInput.value.trim() : '';
+    const filename = filenameInput || 'reading-annotator.json';
+    const autoSync = dom.gistAutoSyncToggle ? dom.gistAutoSyncToggle.checked : false;
+
+    const nextConfig = sanitizeGistConfig({
+        token,
+        gistId,
+        filename,
+        autoSync,
+        lastSyncAt: state.gistConfig && state.gistConfig.lastSyncAt ? state.gistConfig.lastSyncAt : null,
+        status: state.gistConfig && state.gistConfig.status ? state.gistConfig.status : 'idle'
+    });
+    nextConfig.status = autoSync ? 'idle' : nextConfig.status;
+
+    state.gistConfig = nextConfig;
+    if (!autoSync && gistAutoSyncTimer) {
+        clearTimeout(gistAutoSyncTimer);
+        gistAutoSyncTimer = null;
+    }
+    refreshGistSettingsUI();
+    closeGistSettingsModal();
+
+
+    gistAutoSyncSuspended = true;
+    persistState();
+    gistAutoSyncSuspended = false;
+    if (state.gistConfig.autoSync) {
+        maybeQueueGistAutoSync();
+    }
+
+
+    if (typeof showToast === 'function') {
+        showToast('Gist 设置已保存', 'success');
+    } else {
+        alert('Gist 设置已保存');
+    }
+}
+
+function handleGistAutoSyncToggle(event) {
+    const enabled = Boolean(event && event.target ? event.target.checked : false);
+    state.gistConfig = sanitizeGistConfig(Object.assign({}, state.gistConfig, { autoSync: enabled }));
+    if (!enabled && gistAutoSyncTimer) {
+        clearTimeout(gistAutoSyncTimer);
+        gistAutoSyncTimer = null;
+    }
+    refreshGistSettingsUI();
+    gistAutoSyncSuspended = true;
+    persistState();
+    gistAutoSyncSuspended = false;
+    if (enabled) {
+        maybeQueueGistAutoSync();
+    }
+}
+
+function refreshGistSettingsUI() {
+    state.gistConfig = sanitizeGistConfig(state.gistConfig);
+
+    if (dom.gistTokenInput && document.activeElement !== dom.gistTokenInput) {
+        dom.gistTokenInput.value = state.gistConfig.token || '';
+    }
+    if (dom.gistIdInput && document.activeElement !== dom.gistIdInput) {
+        dom.gistIdInput.value = state.gistConfig.gistId || '';
+    }
+    if (dom.gistFilenameInput && document.activeElement !== dom.gistFilenameInput) {
+        dom.gistFilenameInput.value = state.gistConfig.filename || 'reading-annotator.json';
+    }
+    if (dom.gistAutoSyncToggle) {
+        dom.gistAutoSyncToggle.checked = Boolean(state.gistConfig.autoSync);
+    }
+    if (dom.gistStatusText) {
+        const statusLabels = {
+            syncing: '同步中',
+            success: '已同步',
+            error: '同步失败',
+            idle: '未同步'
+        };
+        dom.gistStatusText.textContent = statusLabels[state.gistConfig.status] || '未同步';
+    }
+    if (dom.gistLastSyncValue) {
+        dom.gistLastSyncValue.textContent = state.gistConfig.lastSyncAt ? formatGistTimestamp(state.gistConfig.lastSyncAt) : '尚无记录';
+    }
+}
+
+function formatGistTimestamp(value) {
+    if (!value) return '';
+    try {
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return value;
+        return date.toLocaleString();
+    } catch (error) {
+        console.warn('[gist] 无法格式化时间', value, error);
+        return value;
+    }
+}
+
+function maybeQueueGistAutoSync() {
+    if (gistAutoSyncSuspended) return;
+    const config = sanitizeGistConfig(state.gistConfig);
+    if (!config.autoSync || !config.token || !config.filename) {
+        return;
+    }
+    if (gistSyncInFlight) return;
+    if (gistAutoSyncTimer) {
+        clearTimeout(gistAutoSyncTimer);
+    }
+    gistAutoSyncTimer = setTimeout(() => {
+        gistAutoSyncTimer = null;
+        syncDataToGist({ silent: true });
+    }, GIST_SYNC_DEBOUNCE_MS);
+}
+
+async function syncDataToGist({ manual = false, silent = false } = {}) {
+    const config = sanitizeGistConfig(state.gistConfig);
+    if (!config.token) {
+        if (!silent) {
+            alert('请先在 Gist 设置中填写个人访问令牌 (PAT)。');
+        }
+        return;
+    }
+
+    if (typeof fetch !== 'function') {
+        if (!silent) {
+            alert('当前浏览器不支持 fetch，无法同步到 Gist。');
+        }
+        return;
+    }
+
+    if (gistSyncInFlight) {
+        if (!silent && typeof showToast === 'function') {
+            showToast('正在同步，请稍候…', 'info');
+        }
+        return;
+    }
+
+    if (gistAutoSyncTimer) {
+        clearTimeout(gistAutoSyncTimer);
+        gistAutoSyncTimer = null;
+    }
+
+    const filename = config.filename || 'reading-annotator.json';
+    const payload = buildPersistedPayload();
+    const timestamp = new Date().toISOString();
+    payload.syncedAt = timestamp;
+
+    const body = {
+        description: 'Reading Annotator 数据同步',
+        files: {
+            [filename]: {
+                content: JSON.stringify(payload, null, 2)
+            }
+        },
+    };
+
+    const isUpdate = Boolean(config.gistId);
+    if (!isUpdate) {
+        body.public = false;
+    }
+    const url = isUpdate ? `https://api.github.com/gists/${config.gistId}` : 'https://api.github.com/gists';
+    const method = isUpdate ? 'PATCH' : 'POST';
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github+json',
+        'Authorization': `Bearer ${config.token}`
+    };
+
+    gistSyncInFlight = true;
+    state.gistConfig.status = 'syncing';
+    refreshGistSettingsUI();
+
+    try {
+        const response = await fetch(url, {
+            method,
+            headers,
+            body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Gist API 返回错误：${response.status} ${errorText}`);
+        }
+
+        const data = await response.json();
+        if (!isUpdate && data && typeof data.id === 'string') {
+            state.gistConfig.gistId = data.id;
+        }
+        state.gistConfig.lastSyncAt = timestamp;
+        state.gistConfig.status = 'success';
+
+        if (manual && typeof showToast === 'function') {
+            showToast('已同步到 Gist', 'success');
+        }
+    } catch (error) {
+        console.error('[gist] 同步失败', error);
+        state.gistConfig.status = 'error';
+        if (!silent) {
+            if (typeof showToast === 'function') {
+                showToast('同步 Gist 失败，请检查网络和令牌设置', 'error');
+            } else {
+                alert('同步 Gist 失败，请检查网络和令牌设置');
+            }
+        }
+    } finally {
+        gistSyncInFlight = false;
+        gistAutoSyncSuspended = true;
+        persistState();
+        gistAutoSyncSuspended = false;
+        refreshGistSettingsUI();
     }
 }
 
@@ -6300,7 +6115,7 @@ async function handleDataRestore(event) {
     }
 }
 
-function submitAnnotation({ category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, range, textOverride, dashed, slash, customTextColor, boldColor, underlineColor, borderColor }) {
+function submitAnnotation({ category, customCategory, color, underline, bold, strikethrough, borderStyle, emoji, showNoteBelow, customBgColor, fontFamily, underlineOnly, textColor, fontSize, note, tags, range, textOverride, dashed, slash, customTextColor, underlineColor, borderColor }) {
     const activeDocument = getActiveDocument();
     if (!activeDocument) {
         alert('请先创建或选择一篇短文。');
@@ -6431,7 +6246,6 @@ function submitAnnotation({ category, customCategory, color, underline, bold, st
         dashed: dashed !== undefined ? Boolean(dashed) : (state.lastDashed || false),
         slash: slash !== undefined ? Boolean(slash) : (state.lastSlash || false),
         customTextColor: customTextColor !== undefined ? customTextColor : state.lastCustomTextColor,
-        boldColor: boldColor !== undefined ? boldColor : null,
         underlineColor: underlineColor !== undefined ? underlineColor : null,
         borderColor: borderColor !== undefined ? borderColor : null
     };
@@ -6495,7 +6309,6 @@ function handleQuickHighlight() {
         slash: state.lastSlash,
         customTextColor: state.lastCustomTextColor,
         // 只有当对应的样式被激活且颜色已设置时，才应用颜色
-        boldColor: (state.lastBold && state.lastBoldColor) ? state.lastBoldColor : null,
         underlineColor: (state.lastUnderline && state.lastUnderlineColor) ? state.lastUnderlineColor : null,
         borderColor: (state.lastBorderStyle !== 'none' && state.lastBorderColor) ? state.lastBorderColor : null,
         note: '',
@@ -6550,194 +6363,40 @@ function applyQuickFormat() {
     }
 }
 
-// 加载已标注文字的样式到工具栏（快速模式专用）
-function loadAnnotationStyleToToolbar(highlight) {
-    const annotationId = highlight.dataset.id;
-    const record = state.annotations.find(item => item.id === annotationId);
-    if (!record) {
-        console.log('[DEBUG] ❌ 未找到标注记录');
-        return;
-    }
-
-    console.log('[DEBUG] 📋 加载标注样式到工具栏', {
-        id: annotationId,
-        category: record.category,
-        color: record.color,
-        bold: record.bold,
-        underline: record.underline
-    });
-
-    // 标记当前正在编辑的标注ID（用于后续更新）
-    state.editingId = annotationId;
-
-    // 更新类别按钮状态
-    if (dom.formatCategoryButtons) {
-        dom.formatCategoryButtons.forEach(btn => {
-            const isActive = btn.dataset.category === record.category;
-            btn.classList.toggle('active', isActive);
-            if (isActive) {
-                state.lastCategory = record.category;
-            }
-        });
-    }
-
-    // 更新颜色按钮状态
-    if (dom.formatColorButtons) {
-        dom.formatColorButtons.forEach(btn => {
-            const isActive = btn.dataset.color === record.color;
-            btn.classList.toggle('active', isActive);
-            if (isActive) {
-                state.lastColor = record.color;
-            }
-        });
-    }
-
-    // 更新加粗按钮状态
-    if (dom.formatBoldToggle) {
-        const isActive = Boolean(record.bold);
-        dom.formatBoldToggle.classList.toggle('active', isActive);
-        dom.formatBoldToggle.setAttribute('aria-pressed', String(isActive));
-        state.lastBold = isActive;
-    }
-
-    // 更新下划线按钮状态
-    if (dom.formatUnderlineToggle) {
-        const isActive = Boolean(record.underline);
-        dom.formatUnderlineToggle.classList.toggle('active', isActive);
-        dom.formatUnderlineToggle.setAttribute('aria-pressed', String(isActive));
-        state.lastUnderline = isActive;
-    }
-
-    // 更新删除线按钮状态
-    if (dom.formatStrikethroughToggle) {
-        const isActive = Boolean(record.strikethrough);
-        dom.formatStrikethroughToggle.classList.toggle('active', isActive);
-        dom.formatStrikethroughToggle.setAttribute('aria-pressed', String(isActive));
-        state.lastStrikethrough = isActive;
-    }
-
-    // 更新边框按钮状态
-    if (dom.formatBorderButtons) {
-        dom.formatBorderButtons.forEach(btn => {
-            const isActive = btn.dataset.border === record.borderStyle;
-            btn.classList.toggle('active', isActive);
-            if (isActive) {
-                state.lastBorderStyle = record.borderStyle;
-            }
-        });
-    }
-
-    // 更新虚线按钮状态
-    if (dom.formatDashedToggle) {
-        const isActive = Boolean(record.dashed);
-        dom.formatDashedToggle.classList.toggle('active', isActive);
-        dom.formatDashedToggle.setAttribute('aria-pressed', String(isActive));
-        state.lastDashed = isActive;
-    }
-
-    // 更新斜杠按钮状态
-    if (dom.formatSlashToggle) {
-        const isActive = Boolean(record.slash);
-        dom.formatSlashToggle.classList.toggle('active', isActive);
-        dom.formatSlashToggle.setAttribute('aria-pressed', String(isActive));
-        state.lastSlash = isActive;
-    }
-
-    // 保存其他样式配置
-    state.lastCustomTextColor = record.customTextColor || null;
-    state.lastBoldColor = record.boldColor || null;
-    state.lastUnderlineColor = record.underlineColor || null;
-    state.lastBorderColor = record.borderColor || null;
-    state.lastEmoji = record.emoji || '';
-
-    showToast('✓ 已选中标注，点击active按钮可取消样式', 'info');
-}
-
-// 更新已标注文字的样式（快速模式专用）
-function updateAnnotationStyle() {
-    if (!state.editingId) {
-        console.log('[DEBUG] ❌ 没有正在编辑的标注ID');
-        return;
-    }
-
-    const record = state.annotations.find(item => item.id === state.editingId);
-    if (!record) {
-        console.log('[DEBUG] ❌ 未找到标注记录');
-        return;
-    }
-
-    console.log('[DEBUG] 🔄 更新标注样式', {
-        id: state.editingId,
-        category: state.lastCategory,
-        color: state.lastColor,
-        bold: state.lastBold,
-        underline: state.lastUnderline
-    });
-
-    // 检查类别的 applyStyle 设置
-    const categoryConfig = state.customCategories.find(c => c.id === state.lastCategory);
-    const shouldApplyStyle = categoryConfig ? categoryConfig.applyStyle : true;
-
-    // 更新标注记录
-    record.category = state.lastCategory;
-    record.customCategory = state.lastCategory === 'custom' ? (state.lastCustomCategory || '') : '';
-    record.color = shouldApplyStyle ? state.lastColor : null;
-    record.bold = shouldApplyStyle ? state.lastBold : false;
-    record.underline = shouldApplyStyle ? state.lastUnderline : false;
-    record.strikethrough = shouldApplyStyle ? (state.lastStrikethrough || false) : false;
-    record.borderStyle = shouldApplyStyle ? (state.lastBorderStyle || 'none') : 'none';
-    record.dashed = shouldApplyStyle ? (state.lastDashed || false) : false;
-    record.slash = shouldApplyStyle ? (state.lastSlash || false) : false;
-    record.emoji = shouldApplyStyle ? (state.lastEmoji || '') : '';
-    record.customTextColor = shouldApplyStyle ? state.lastCustomTextColor : null;
-    record.boldColor = shouldApplyStyle ? state.lastBoldColor : null;
-    record.underlineColor = shouldApplyStyle ? state.lastUnderlineColor : null;
-    record.borderColor = shouldApplyStyle ? state.lastBorderColor : null;
-
-    // 重新渲染该标注
-    const highlights = dom.readingArea.querySelectorAll(`.highlight[data-id="${state.editingId}"]`);
-    if (highlights.length > 0) {
-        highlights.forEach(highlight => {
-            // 移除旧样式
-            highlight.className = 'highlight';
-
-            // 应用新样式
-            applyStylesToElement(highlight, record);
-        });
-
-        console.log('[DEBUG] ✅ 已重新渲染标注');
-    }
-
-    // 更新文档时间戳
-    const activeDocument = getActiveDocument();
-    if (activeDocument) {
-        activeDocument.updatedAt = new Date().toISOString();
-    }
-
-    // 更新UI
-    if (state.autoSync) {
-        renderAnnotationList();
-    } else {
-        updateAnnotationSummary();
-    }
-    renderDocumentList();
-    persistState();
-
-    // 清除编辑状态
-    state.editingId = null;
-
-    showToast('✓ 已更新标注样式', 'success');
-}
-
 // 在快速标注模式下应用标注 - 整合quick-mode-demo逻辑
 function applyQuickAnnotationToSelection(range) {
+    // 确保有类别选择，如果没有则使用第一个自定义类别
+    if (!state.lastCategory && state.customCategories && state.customCategories.length > 0) {
+        state.lastCategory = state.customCategories[0].id;
+        console.log('[DEBUG] 🔄 自动选择默认类别', { category: state.lastCategory });
+
+        // 更新类别按钮状态
+        document.querySelectorAll('.format-category-btn').forEach(btn => {
+            if (btn.dataset.category === state.lastCategory) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
+    }
+
     console.log('[DEBUG] ⚡ 快速标注模式触发', {
         hasColor: !!state.lastColor,
         hasCategory: !!state.lastCategory,
+        category: state.lastCategory,
         hasBold: state.lastBold,
         hasUnderline: state.lastUnderline,
         hasBorder: state.lastBorderStyle && state.lastBorderStyle !== 'none'
     });
+
+    // 验证0：必须有类别
+    if (!state.lastCategory) {
+        if (typeof showToast === 'function') {
+            showToast('⚠️ 请先选择标注类别', 'warning');
+        }
+        window.getSelection()?.removeAllRanges();
+        return;
+    }
 
     // 验证1：不支持跨段落标注
     if (!isRangeWithinSingleParagraph(range)) {
@@ -6794,7 +6453,6 @@ function applyQuickAnnotationToSelection(range) {
                 dashed: shouldApplyStyle ? (state.lastDashed || false) : false,
                 slash: shouldApplyStyle ? (state.lastSlash || false) : false,
                 customTextColor: shouldApplyStyle ? state.lastCustomTextColor : null,
-                boldColor: shouldApplyStyle ? state.lastBoldColor : null,
                 underlineColor: shouldApplyStyle ? state.lastUnderlineColor : null,
                 borderColor: shouldApplyStyle ? state.lastBorderColor : null,
                 note: '',
@@ -6856,7 +6514,6 @@ function applyQuickAnnotationToSelection(range) {
         dashed: shouldApplyStyle ? (state.lastDashed || false) : false,
         slash: shouldApplyStyle ? (state.lastSlash || false) : false,
         customTextColor: shouldApplyStyle ? state.lastCustomTextColor : null,
-        boldColor: shouldApplyStyle ? state.lastBoldColor : null,
         underlineColor: shouldApplyStyle ? state.lastUnderlineColor : null,
         borderColor: shouldApplyStyle ? state.lastBorderColor : null,
         note: '',
@@ -6944,7 +6601,9 @@ function showHighlightTooltip(target, mouseEvent = null) {
     }
 
     const tooltip = createTooltip();
-    tooltip.textContent = record.note;
+    // 支持换行：将 \n 转换为 <br> 标签，并保��white-space: pre-wrap以保留格式
+    tooltip.innerHTML = escapeHtml(record.note).replace(/\n/g, '<br>');
+    tooltip.style.whiteSpace = 'pre-wrap';
     console.log('[DEBUG] ✅ Tooltip内容已设置');
 
     // 先设置位置为不可见，避免闪烁
@@ -8174,7 +7833,6 @@ function quickAnnotate(category) {
         dashed: state.lastDashed || false,
         slash: state.lastSlash || false,
         customTextColor: state.lastCustomTextColor,
-        boldColor: state.lastBoldColor,
         underlineColor: state.lastUnderlineColor,
         borderColor: state.lastBorderColor,
         note: '',
@@ -8595,16 +8253,104 @@ function hideCategoryManageModal() {
 function renderCategoryList() {
     if (!dom.categoryList) return;
 
-    const html = state.customCategories.map((cat, index) => `
-        <div class="category-item" style="display: flex; align-items: center; gap: 10px; padding: 12px; background: #f8f9fa; border-radius: 8px; margin-bottom: 10px;">
-            <input type="text" value="${cat.label}" data-index="${index}" class="category-label-input" style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
-            <label style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
-                <input type="checkbox" ${cat.applyStyle ? 'checked' : ''} data-index="${index}" class="category-style-toggle">
-                <span style="font-size: 13px;">应用样式</span>
-            </label>
-            <button type="button" class="category-delete-btn ghost-btn" data-index="${index}" style="padding: 4px 8px; font-size: 12px;">🗑️</button>
+    const html = state.customCategories.map((cat, index) => {
+        // 确保defaultStyle存在
+        const style = cat.defaultStyle || {
+            color: null,
+            textColor: null,
+            bold: false,
+            underline: false,
+            borderStyle: 'none',
+            borderColor: null,
+            underlineColor: null
+        };
+
+        return `
+        <div class="category-item" style="border: 1px solid #e0e0e0; border-radius: 8px; margin-bottom: 16px; overflow: hidden;">
+            <!-- 类别基本信息 -->
+            <div style="display: flex; align-items: center; gap: 10px; padding: 12px; background: #f8f9fa;">
+                <input type="text" value="${cat.label}" data-index="${index}" class="category-label-input" style="flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; font-weight: 500;">
+                <label style="display: flex; align-items: center; gap: 5px; white-space: nowrap;">
+                    <input type="checkbox" ${cat.applyStyle ? 'checked' : ''} data-index="${index}" class="category-style-toggle">
+                    <span style="font-size: 13px;">应用样式</span>
+                </label>
+                <button type="button" class="category-style-config-btn ghost-btn" data-index="${index}" style="padding: 4px 8px; font-size: 12px;">⚙️ 样式配置</button>
+                <button type="button" class="category-delete-btn ghost-btn" data-index="${index}" style="padding: 4px 8px; font-size: 12px;">🗑️</button>
+            </div>
+
+            <!-- 样式配置区域（可折叠） -->
+            <div class="category-style-config" data-index="${index}" style="display: none; padding: 16px; background: #fff; border-top: 1px solid #e0e0e0;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <!-- 背景颜色 -->
+                    <div>
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">背景颜色</label>
+                        <select data-index="${index}" data-property="color" class="category-style-input" style="width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="">无</option>
+                            <option value="honey" ${style.color === 'honey' ? 'selected' : ''}>🍯 蜜糖色</option>
+                            <option value="mint" ${style.color === 'mint' ? 'selected' : ''}>🌿 薄荷色</option>
+                            <option value="sky" ${style.color === 'sky' ? 'selected' : ''}>☁️ 天空色</option>
+                            <option value="orchid" ${style.color === 'orchid' ? 'selected' : ''}>🌸 兰花色</option>
+                            <option value="sunset" ${style.color === 'sunset' ? 'selected' : ''}>🌅 落日色</option>
+                        </select>
+                    </div>
+
+                    <!-- 文本颜色 -->
+                    <div>
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">文本颜色</label>
+                        <input type="color" data-index="${index}" data-property="textColor" class="category-style-input" value="${style.textColor || '#000000'}" style="width: 100%; height: 34px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">
+                        <button type="button" class="category-clear-color-btn" data-index="${index}" data-property="textColor" style="font-size: 11px; padding: 2px 6px; margin-top: 4px;">清除</button>
+                    </div>
+
+                    <!-- 文本样式 -->
+                    <div style="grid-column: 1 / -1;">
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">文本样式</label>
+                        <div style="display: flex; gap: 16px;">
+                            <label style="display: flex; align-items: center; gap: 5px;">
+                                <input type="checkbox" data-index="${index}" data-property="bold" class="category-style-input" ${style.bold ? 'checked' : ''}>
+                                <span style="font-size: 13px; font-weight: bold;">加粗</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 5px;">
+                                <input type="checkbox" data-index="${index}" data-property="underline" class="category-style-input" ${style.underline ? 'checked' : ''}>
+                                <span style="font-size: 13px; text-decoration: underline;">下划线</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- 边框样式 -->
+                    <div>
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">边框样式</label>
+                        <select data-index="${index}" data-property="borderStyle" class="category-style-input" style="width: 100%; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="none" ${style.borderStyle === 'none' ? 'selected' : ''}>无</option>
+                            <option value="square" ${style.borderStyle === 'square' ? 'selected' : ''}>□ 方框</option>
+                            <option value="round" ${style.borderStyle === 'round' ? 'selected' : ''}>○ 圆框</option>
+                            <option value="dashed" ${style.borderStyle === 'dashed' ? 'selected' : ''}>-- 虚线</option>
+                        </select>
+                    </div>
+
+                    <!-- 边框颜色 -->
+                    <div>
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">边框颜色</label>
+                        <input type="color" data-index="${index}" data-property="borderColor" class="category-style-input" value="${style.borderColor || '#2563eb'}" style="width: 100%; height: 34px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">
+                        <button type="button" class="category-clear-color-btn" data-index="${index}" data-property="borderColor" style="font-size: 11px; padding: 2px 6px; margin-top: 4px;">清除</button>
+                    </div>
+
+                    <!-- 下划线颜色 -->
+                    <div style="grid-column: 1 / -1;">
+                        <label style="display: block; margin-bottom: 6px; font-size: 13px; font-weight: 500; color: #666;">下划线颜色</label>
+                        <input type="color" data-index="${index}" data-property="underlineColor" class="category-style-input" value="${style.underlineColor || '#2563eb'}" style="width: 200px; height: 34px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer;">
+                        <button type="button" class="category-clear-color-btn" data-index="${index}" data-property="underlineColor" style="font-size: 11px; padding: 2px 6px; margin-left: 8px;">清除</button>
+                    </div>
+                </div>
+
+                <!-- 预览 -->
+                <div style="margin-top: 16px; padding: 12px; background: #f8f9fa; border-radius: 6px;">
+                    <span style="font-size: 12px; color: #666; display: block; margin-bottom: 8px;">预览效果：</span>
+                    <span class="category-style-preview" data-index="${index}" style="font-size: 16px; ${generatePreviewStyle(style)}">示例文本 Sample Text</span>
+                </div>
+            </div>
         </div>
-    `).join('');
+        `;
+    }).join('');
 
     dom.categoryList.innerHTML = html;
 
@@ -8620,6 +8366,128 @@ function renderCategoryList() {
     dom.categoryList.querySelectorAll('.category-delete-btn').forEach(btn => {
         btn.addEventListener('click', handleCategoryDelete);
     });
+
+    dom.categoryList.querySelectorAll('.category-style-config-btn').forEach(btn => {
+        btn.addEventListener('click', handleCategoryStyleConfigToggle);
+    });
+
+    dom.categoryList.querySelectorAll('.category-style-input').forEach(input => {
+        input.addEventListener('change', handleCategoryStylePropertyChange);
+        input.addEventListener('input', handleCategoryStylePropertyChange);
+    });
+
+    dom.categoryList.querySelectorAll('.category-clear-color-btn').forEach(btn => {
+        btn.addEventListener('click', handleCategoryClearColor);
+    });
+}
+
+// 生成预览样式
+function generatePreviewStyle(style) {
+    const styles = [];
+
+    if (style.color) {
+        // 使用CSS类
+        styles.push(`background-color: var(--color-${style.color})`);
+    }
+    if (style.textColor) {
+        styles.push(`color: ${style.textColor}`);
+    }
+    if (style.bold) {
+        styles.push('font-weight: bold');
+    }
+    if (style.underline) {
+        styles.push('text-decoration: underline');
+        if (style.underlineColor) {
+            styles.push(`text-decoration-color: ${style.underlineColor}`);
+        }
+    }
+    if (style.borderStyle && style.borderStyle !== 'none') {
+        const borderColor = style.borderColor || '#2563eb';
+        if (style.borderStyle === 'round') {
+            styles.push(`border: 2px solid ${borderColor}`);
+            styles.push('border-radius: 12px');
+            styles.push('padding: 2px 8px');
+        } else if (style.borderStyle === 'square') {
+            styles.push(`border: 2px solid ${borderColor}`);
+            styles.push('border-radius: 2px');
+            styles.push('padding: 2px 6px');
+        } else if (style.borderStyle === 'dashed') {
+            styles.push(`border: 2px dashed ${borderColor}`);
+            styles.push('border-radius: 2px');
+            styles.push('padding: 2px 6px');
+        }
+    }
+
+    return styles.join('; ');
+}
+
+// 切换样式配置区域显示
+function handleCategoryStyleConfigToggle(event) {
+    const index = event.target.dataset.index;
+    const configDiv = dom.categoryList.querySelector(`.category-style-config[data-index="${index}"]`);
+    if (configDiv) {
+        const isHidden = configDiv.style.display === 'none';
+        configDiv.style.display = isHidden ? 'block' : 'none';
+        event.target.textContent = isHidden ? '⚙️ 关闭配置' : '⚙️ 样式配置';
+    }
+}
+
+// 处理样式属性变化
+function handleCategoryStylePropertyChange(event) {
+    const index = parseInt(event.target.dataset.index);
+    const property = event.target.dataset.property;
+    const cat = state.customCategories[index];
+
+    if (!cat.defaultStyle) {
+        cat.defaultStyle = {
+            color: null,
+            textColor: null,
+            bold: false,
+            underline: false,
+            borderStyle: 'none',
+            borderColor: null,
+            underlineColor: null
+        };
+    }
+
+    // 根据输入类型处理值
+    if (event.target.type === 'checkbox') {
+        cat.defaultStyle[property] = event.target.checked;
+    } else if (event.target.type === 'color') {
+        cat.defaultStyle[property] = event.target.value;
+    } else if (property === 'color' || property === 'borderStyle') {
+        cat.defaultStyle[property] = event.target.value || null;
+    } else {
+        cat.defaultStyle[property] = event.target.value;
+    }
+
+    persistState();
+
+    // 更新预览
+    const previewEl = dom.categoryList.querySelector(`.category-style-preview[data-index="${index}"]`);
+    if (previewEl) {
+        previewEl.style.cssText = generatePreviewStyle(cat.defaultStyle) + '; font-size: 16px;';
+    }
+
+    showToast('样式已更新', 'success');
+}
+
+// 清除颜色
+function handleCategoryClearColor(event) {
+    const index = parseInt(event.target.dataset.index);
+    const property = event.target.dataset.property;
+    const cat = state.customCategories[index];
+
+    if (cat.defaultStyle) {
+        cat.defaultStyle[property] = null;
+    }
+
+    persistState();
+
+    // 重新渲染
+    renderCategoryList();
+
+    showToast('颜色已清除', 'success');
 }
 
 function handleCategoryLabelChange(event) {
@@ -8754,54 +8622,105 @@ function handleFormatCategorySelection(btn) {
         state.lastCategory = category;
         console.log('[DEBUG] ✅ 类别已选中', { category });
 
-        // 检查类别的 applyStyle 设置
+        // 检查类别的 applyStyle 设置和默认样式
         const categoryConfig = state.customCategories.find(c => c.id === category);
+
         if (categoryConfig && !categoryConfig.applyStyle) {
             // 仅分类模式：清除所有格式状态
-            state.lastColor = null; // 清除荧光笔颜色
+            state.lastColor = null;
             state.lastBold = false;
             state.lastUnderline = false;
             state.lastDashed = false;
             state.lastSlash = false;
             state.lastBorderStyle = 'none';
             state.lastCustomTextColor = null;
-            state.lastBoldColor = null;
             state.lastUnderlineColor = null;
             state.lastBorderColor = null;
 
-            // 清除荧光笔颜色按钮的激活状态
+            // 清除UI状态
             updateActiveColorButtons(dom.colorButtons, null);
             updateActiveColorButtons(dom.formatColorButtons, null);
-
-            // 清除工具栏按钮的激活状态
             if (dom.formatBoldToggle) dom.formatBoldToggle.classList.remove('active');
             if (dom.formatUnderlineToggle) dom.formatUnderlineToggle.classList.remove('active');
             if (dom.formatDashedToggle) dom.formatDashedToggle.classList.remove('active');
             if (dom.formatSlashToggle) dom.formatSlashToggle.classList.remove('active');
-            if (dom.formatBorderSquare) dom.formatBorderSquare.classList.remove('active');
-            if (dom.formatBorderRound) dom.formatBorderRound.classList.remove('active');
 
-            // 隐藏颜色按钮
-            if (dom.boldColorBtn) dom.boldColorBtn.classList.add('hidden');
-            if (dom.underlineColorBtn) dom.underlineColorBtn.classList.add('hidden');
-            if (dom.borderColorBtn) dom.borderColorBtn.classList.add('hidden');
+            document.querySelectorAll('.format-border-btn').forEach(b => b.classList.remove('active'));
 
-            // 重置文本颜色按钮背景
-            if (dom.textColorBtn) {
+            console.log('[DEBUG] 🚫 仅分类模式：已清除所有格式');
+        } else if (categoryConfig && categoryConfig.defaultStyle) {
+            // 应用类别的默认样式
+            const style = categoryConfig.defaultStyle;
+            console.log('[DEBUG] 🎨 应用类别默认样式', style);
+
+            // 应用背景颜色
+            state.lastColor = style.color || null;
+            updateActiveColorButtons(dom.colorButtons, style.color);
+            updateActiveColorButtons(dom.formatColorButtons, style.color);
+
+            // 应用文本样式
+            state.lastBold = style.bold || false;
+            state.lastUnderline = style.underline || false;
+
+            // 更新按钮状态
+            if (dom.formatBoldToggle) {
+                if (state.lastBold) {
+                    dom.formatBoldToggle.classList.add('active');
+                } else {
+                    dom.formatBoldToggle.classList.remove('active');
+                }
+            }
+
+            if (dom.formatUnderlineToggle) {
+                if (state.lastUnderline) {
+                    dom.formatUnderlineToggle.classList.add('active');
+                } else {
+                    dom.formatUnderlineToggle.classList.remove('active');
+                }
+            }
+
+            // 应用边框样式
+            state.lastBorderStyle = style.borderStyle || 'none';
+            state.lastBorderColor = style.borderColor || null;
+
+            // 更新边框按钮状态
+            document.querySelectorAll('.format-border-btn').forEach(b => {
+                if (b.dataset.border === state.lastBorderStyle) {
+                    b.classList.add('active');
+                } else {
+                    b.classList.remove('active');
+                }
+            });
+
+            // 应用文本颜色
+            state.lastCustomTextColor = style.textColor || null;
+            if (dom.textColorBtn && style.textColor) {
+                dom.textColorBtn.style.background = `linear-gradient(135deg, ${style.textColor} 0%, ${style.textColor} 100%)`;
+            } else if (dom.textColorBtn) {
                 dom.textColorBtn.style.background = '';
             }
 
-            console.log('[DEBUG] 🚫 仅分类模式：已清除所有格式');
+            // 应用下划线颜色
+            state.lastUnderlineColor = style.underlineColor || null;
+            if (dom.underlineColorBtn) {
+                if (state.lastUnderline && style.underlineColor) {
+                    dom.underlineColorBtn.classList.remove('hidden');
+                    dom.underlineColorBtn.style.background = `linear-gradient(135deg, ${style.underlineColor} 0%, ${style.underlineColor} 100%)`;
+                } else {
+                    dom.underlineColorBtn.classList.add('hidden');
+                    dom.underlineColorBtn.style.background = '';
+                }
+            }
+
+            console.log('[DEBUG] ✅ 默认样式已应用', {
+                color: state.lastColor,
+                bold: state.lastBold,
+                underline: state.lastUnderline,
+                borderStyle: state.lastBorderStyle,
+                textColor: state.lastCustomTextColor
+            });
         }
     }
-
-    // 快速标注模式：如果正在编辑标注，立即更新
-    if (quickAnnotationMode && state.editingId) {
-        console.log('[DEBUG] ⚡ 快速模式编辑：立即更新标注');
-        updateAnnotationStyle();
-        return;
-    }
-
     persistState();
 }
 
@@ -8903,9 +8822,6 @@ function initColorPicker() {
     if (dom.textColorBtn) {
         dom.textColorBtn.addEventListener('click', (e) => showColorPicker(e, 'text'));
     }
-    if (dom.boldColorBtn) {
-        dom.boldColorBtn.addEventListener('click', (e) => showColorPicker(e, 'bold'));
-    }
     if (dom.underlineColorBtn) {
         dom.underlineColorBtn.addEventListener('click', (e) => showColorPicker(e, 'underline'));
     }
@@ -8996,9 +8912,6 @@ function updateSelectedColor() {
         case 'text':
             currentColor = state.lastCustomTextColor;
             break;
-        case 'bold':
-            currentColor = state.lastBoldColor;
-            break;
         case 'underline':
             currentColor = state.lastUnderlineColor;
             break;
@@ -9029,12 +8942,6 @@ function selectColor(color) {
                 dom.textColorBtn.style.background = color;
             }
             break;
-        case 'bold':
-            state.lastBoldColor = color;
-            if (dom.boldColorBtn) {
-                dom.boldColorBtn.style.background = color;
-            }
-            break;
         case 'underline':
             state.lastUnderlineColor = color;
             if (dom.underlineColorBtn) {
@@ -9056,4 +8963,3 @@ function selectColor(color) {
     updateSelectedColor();
     hideColorPicker();
 }
-
